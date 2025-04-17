@@ -1,12 +1,14 @@
 import telebot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
-from collections import defaultdict, Counter
+from collections import defaultdict
+import threading
+import time
 
-TOKEN = '8066106264:AAG3557fe91lz54EWtjAbfSNbd6YWEs9x_s'
+TOKEN = "8066106264:AAG3557fe91lz54EWtjAbfSNbd6YWEs9x_s"
 bot = telebot.TeleBot(TOKEN)
 
-inventory_template = {
+inventory = {
     "Motor Boat": 6,
     "Solo Kayak": 6,
     "Double Kayak": 7,
@@ -14,138 +16,150 @@ inventory_template = {
     "SUP": 16,
     "BBQ Boat": 2
 }
-inventory = inventory_template.copy()
-rental_id_counter = defaultdict(int)
+rental_counter = defaultdict(int)
 active_rentals = []
-rental_history = []
 
-def format_time(dt):
-    return dt.strftime('%H:%M')
-
-def get_rental_name(r_type):
-    rental_id_counter[r_type] += 1
-    return f"{r_type} #{rental_id_counter[r_type]}"
-
-def main_menu():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("🚤 Rent Boat", "📦 Inventory")
-    markup.row("🕒 Active Rentals", "✅ Return")
-    markup.row("📊 Daily Stats")
-    return markup
+def rental_id(name):
+    rental_counter[name] += 1
+    return f"{name} #{rental_counter[name]}"
 
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.send_message(message.chat.id, "Ahoy Captain!\nWhat would you like to do?", reply_markup=main_menu())
-
-@bot.message_handler(func=lambda m: True)
-def handle_menu(message):
-    text = message.text
-
-    if text == "📦 Inventory":
-        msg = "*Available Inventory:*\n"
-        for item, count in inventory.items():
-            msg += f"- {item}: {count}\n"
-        bot.send_message(message.chat.id, msg, parse_mode="Markdown")
-
-    elif text == "🚤 Rent Boat":
-        markup = InlineKeyboardMarkup()
-        for item in inventory:
-            if inventory[item] > 0:
-                markup.add(InlineKeyboardButton(f"Rent {item}", callback_data=f"select_{item}"))
-        bot.send_message(message.chat.id, "Choose item to rent:", reply_markup=markup)
-
-    elif text == "🕒 Active Rentals":
-        if not active_rentals:
-            bot.send_message(message.chat.id, "No active rentals.")
-            return
-        msg = "*Active Rentals:*\n"
-        now = datetime.now()
-        for rental in active_rentals:
-            left = rental["end"] - now
-            if left.total_seconds() > 0:
-                time_left = str(left).split('.')[0]
-                msg += f"- {rental['name']}: {time_left} left\n"
-            else:
-                overdue = str(-left).split('.')[0]
-                msg += f"- 🔴 {rental['name']}: ⏰ Time’s up! ({overdue} overdue)\n"
-        bot.send_message(message.chat.id, msg, parse_mode="Markdown")
-
-    elif text == "✅ Return":
-        markup = InlineKeyboardMarkup()
-        for rental in active_rentals:
-            markup.add(InlineKeyboardButton(f"Return {rental['name']}", callback_data=f"return_{rental['name']}"))
-        bot.send_message(message.chat.id, "Select item to return:", reply_markup=markup)
-
-    elif text == "📊 Daily Stats":
-        today = datetime.now().date()
-        rentals_today = [r for r in rental_history if r["start"].date() == today]
-        returns_today = [r for r in rentals_today if isinstance(r["end"], datetime)]
-        overdue = [r for r in active_rentals if r["start"].date() == today and r["end"] < datetime.now()]
-
-        counter = Counter(r["type"] for r in rentals_today)
-        total_hours = sum((r["end"] - r["start"]).total_seconds() for r in returns_today) / 3600
-
-        msg = f"📅 *Daily Summary – {today.strftime('%d.%m.%Y')}*\n\n"
-        msg += f"🔄 Rentals Today: {len(rentals_today)}\n"
-        msg += f"✅ Returns: {len(returns_today)}\n"
-        msg += f"⏰ Overdue: {len(overdue)}\n\n"
-        msg += "*Top Rented:*\n"
-        for t, c in counter.most_common():
-            msg += f"- {t}: {c} times\n"
-        msg += f"\n🕓 Total Rental Time: {round(total_hours, 1)} hours"
-
-        bot.send_message(message.chat.id, msg, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("select_"))
-def select_item(call):
-    item = call.data.split("_", 1)[1]
+def welcome(message):
     markup = InlineKeyboardMarkup()
-    for i in range(1, 13):
-        hours = i * 0.5
-        markup.add(InlineKeyboardButton(f"{hours}h", callback_data=f"rent_{item}_{hours}"))
-    bot.edit_message_text(f"Select rental duration for {item}:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    markup.add(InlineKeyboardButton("🚤 Rent a Boat", callback_data="rent"))
+    bot.send_message(message.chat.id, "Welcome to Captain Sirot! Choose an action:", reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("rent_"))
+@bot.callback_query_handler(func=lambda call: call.data == "rent")
+def choose_boat_type(call):
+    markup = InlineKeyboardMarkup()
+    for item in inventory:
+        if inventory[item] > 0:
+            markup.add(InlineKeyboardButton(item, callback_data=f"choose_{item}"))
+    bot.edit_message_text("Choose a boat to rent:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("choose_"))
+def choose_duration(call):
+    boat_type = call.data.split("_", 1)[1]
+    markup = InlineKeyboardMarkup()
+    durations = [0.5, 1, 2, 4, 8]  # 8 = full day
+    for d in durations:
+        label = f"{d}h" if d < 8 else "All Day"
+        markup.add(InlineKeyboardButton(label, callback_data=f"duration_{boat_type}_{d}"))
+    bot.edit_message_text(f"Select rental duration for {boat_type}:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("duration_"))
 def confirm_rental(call):
-    _, item, hours = call.data.split("_")
+    _, boat_type, hours = call.data.split("_")
     hours = float(hours)
-    if inventory[item] <= 0:
+    if inventory[boat_type] <= 0:
         bot.answer_callback_query(call.id, "Not available.")
         return
 
-    rental_name = get_rental_name(item)
-    return_time = datetime.now() + timedelta(hours=hours)
-    active_rentals.append({
-        "name": rental_name,
-        "type": item,
-        "user": call.from_user.id,
-        "start": datetime.now(),
-        "end": return_time
-    })
-    rental_history.append({
-        "type": item,
-        "start": datetime.now(),
-        "end": return_time
-    })
-    inventory[item] -= 1
-    msg = f"✅ *{rental_name}* rented for *{hours}h*\n⏳ Return by: *{format_time(return_time)}*"
-    bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+    name = rental_id(boat_type)
+    start = datetime.now()
+    end = start + timedelta(hours=hours)
+    rental = {
+        "chat_id": call.message.chat.id,
+        "message_id": None,
+        "name": name,
+        "type": boat_type,
+        "start": start,
+        "end": end,
+        "timer_msg": None,
+        "cancel_stage": False
+    }
+    active_rentals.append(rental)
+    inventory[boat_type] -= 1
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("return_"))
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("✅ Returned", callback_data=f"returned_{name}"),
+        InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{name}")
+    )
+
+    msg = bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text=f"✅ *{name}* rented until *{end.strftime('%H:%M')}*",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+    rental["message_id"] = msg.message_id
+
+    threading.Thread(target=countdown_timer, args=(rental,), daemon=True).start()
+
+def countdown_timer(rental):
+    while True:
+        now = datetime.now()
+        if now >= rental["end"]:
+            remaining = "⏰ Time's up!"
+        else:
+            remaining = str(rental["end"] - now).split('.')[0]
+        try:
+            markup = InlineKeyboardMarkup()
+            markup.row(
+                InlineKeyboardButton("✅ Returned", callback_data=f"returned_{rental['name']}"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{rental['name']}")
+            )
+            bot.edit_message_text(
+                chat_id=rental["chat_id"],
+                message_id=rental["message_id"],
+                text=f"🛶 *{rental['name']}*\n⏳ Time left: *{remaining}*",
+                parse_mode="Markdown",
+                reply_markup=markup
+            )
+        except:
+            pass
+        time.sleep(30)
+        if rental not in active_rentals:
+            break
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("returned_"))
 def handle_return(call):
     name = call.data.split("_", 1)[1]
     for rental in active_rentals:
         if rental["name"] == name:
-            inventory[rental["type"]] += 1
-            overdue = max(datetime.now() - rental["end"], timedelta(0))
-            msg = f"✅ {name} returned.\n⌛ Delay: {str(overdue).split('.')[0]}" if overdue > timedelta(0) else f"✅ {name} returned on time."
-            bot.edit_message_text(msg, call.message.chat.id, call.message.message_id)
-            rental_history.append({
-                "type": rental["type"],
-                "start": rental["start"],
-                "end": datetime.now()
-            })
             active_rentals.remove(rental)
-            return
+            inventory[rental["type"]] += 1
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id,
+                text=f"✅ *{name}* was returned.",
+                parse_mode="Markdown")
+            break
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cancel_"))
+def confirm_cancel(call):
+    name = call.data.split("_", 1)[1]
+    for rental in active_rentals:
+        if rental["name"] == name:
+            markup = InlineKeyboardMarkup()
+            markup.add(
+                InlineKeyboardButton("✅ Yes, cancel", callback_data=f"cancel_yes_{name}"),
+                InlineKeyboardButton("❌ No", callback_data=f"cancel_no_{name}")
+            )
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id,
+                text=f"⚠️ Are you sure you want to cancel *{name}*?",
+                parse_mode="Markdown",
+                reply_markup=markup)
+            break
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cancel_yes_"))
+def cancel_yes(call):
+    name = call.data.split("_", 2)[2]
+    for rental in active_rentals:
+        if rental["name"] == name:
+            active_rentals.remove(rental)
+            inventory[rental["type"]] += 1
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id,
+                text=f"❌ *{name}* has been canceled.",
+                parse_mode="Markdown")
+            break
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cancel_no_"))
+def cancel_no(call):
+    name = call.data.split("_", 2)[2]
+    for rental in active_rentals:
+        if rental["name"] == name:
+            countdown_timer(rental)
+            break
 
 bot.infinity_polling()
